@@ -12,7 +12,6 @@ import time
 #!Use multiprocessing/threading (multiprocessessing might be faster) to speed up indexing times
 #!and find a way to evenly split up the channels in the multiprocessessing
 #!Fix ending time print values
-#!USE OOP!
 #!Make it so that dropped connections do not completely stop the bot
 #!make it so that if someone double-texts (or triple texts or whatever), do not count it as multiple messages
 #!include optional value to append strings in a list to check how many times each person in the server has included those strings in their messages
@@ -35,16 +34,16 @@ import time
 #?let us create a dictionary, where the keys are author_id's, and the values to each key is a number of dictionaries where each
 #?dictionary corresponds to the variables of that user in a specific channel.
 
-ID_OF_SERVER = 540980541810540551 #741441440021741579
+ID_OF_SERVER = 740477067187060801 #741441440021741579
 channels_to_measure = [] #leave empty to measure all channels 741441440021741582
 keys_to_remove = ['author', 'author_user_profile', 'message_dates_sent'] #list of attributes of Author objects to remove from the final spreadsheets
-message_capture_limit = None #Input None to measure the entire channel
+message_capture_limit = 5 #Input None to measure the entire channel
 replace_zeroes_with_empty_cells = False
 measure_by_people = True
-measure_dates_per_person = True
+measure_dates_per_person = False
 measure_by_dates = False
 file_save_location = r'D:\Programs\Python\Discord Spreadsheets'
-token = '' #alt
+token = 'NzEyMTQ5NTU1MjkwMDQ2NDg0.GyQzlg.zANxAqmedGN7KhgiJIrCrwaWfzZEEkofrS0EnY' #alt
 
 now = datetime.now().date()
 now_utc = datetime.now(timezone.utc).date()
@@ -67,6 +66,12 @@ def is_none_checker(attribute, self, other):
         return other_attr
     else:
         return None
+
+def contains(list, filter):
+    for x in list:
+        if filter(x):
+            return True
+    return False
 
 class Author:
     def __init__(self, message=None, DATE_DICT_ZEROES=None, input_dict=None):
@@ -115,12 +120,6 @@ class Author:
         '''
         Checks to see if the user is still in the Discord server being read.
         '''
-        def contains(list, filter):
-            for x in list:
-                if filter(x):
-                    return True
-            return False
-        
         user_profile_cached = asyncio.Event()
         asyncio.create_task(self.get_user_profile(user_profile_cached))
         await user_profile_cached.wait()
@@ -128,10 +127,13 @@ class Author:
         if self.author_user_profile is not None:
             if contains(self.author_user_profile.mutual_guilds, lambda x: x.id == ID_OF_SERVER):
                 self.in_server = True
+                return True
             else:
                 self.in_server = False
+                return False
         else:
             self.in_server = False
+            return False
 
     
     def update_message_totals(self, message):
@@ -156,6 +158,16 @@ class Author:
         self.latest_date = max(self.message_dates_sent)
         self.days_since_first_message = (now_utc - self.earliest_date).days
         self.days_since_last_message = (now_utc - self.latest_date).days
+    
+    def update_attributes(self, attribute_dict):
+        '''
+        Takes as input a dictionary, where the keys are attribute names and the values are the corresponding values of each attribute key.
+        Adds attributes to a single Author object. Useful when you have gathered an attribute for a particular author_id that will cause
+        you to be rate-limited by Discord if called too many times.
+        '''
+        for key in attribute_dict:
+            if not hasattr(self, key):
+                setattr(self, key, attribute_dict[key])
     
     def make_values_nan(self):
         '''
@@ -253,21 +265,19 @@ async def on_ready():
     guild = client.get_guild(ID_OF_SERVER)
     id_of_channels = channel_list_creator(guild, guild.me, channels_to_measure)
     
-    cached_user_profiles = []
+    attribute_dict = {}
     global_author_dict, global_date_dict = {}, {}
-    if measure_by_people and measure_dates_per_person:
+    if measure_by_people:
         DATE_DICT_ZEROES = empty_date_dict_generator(guild)
-    elif measure_by_people and not measure_dates_per_person:
-        DATE_DICT_ZEROES = None
     if measure_by_dates:
-        date_list = list(empty_date_dict_generator(guild).keys())
+        DATE_LIST = list(empty_date_dict_generator(guild).keys())
     
     for channel_id in id_of_channels:
         local_author_dict, local_date_dict = {}, {}
         channel = client.get_channel(channel_id)
         
         if measure_by_dates:
-            for date in date_list:
+            for date in DATE_LIST:
                 local_date_dict[date] = Date(date)
         
         total_messages = 0
@@ -291,18 +301,22 @@ async def on_ready():
         if total_messages != 0:
             if measure_by_people:
                 for author in local_author_dict:
-                    if author not in cached_user_profiles:
-                        await local_author_dict[author].in_server_check()
-                        cached_user_profiles.append(author)
+                    if author not in list(attribute_dict.keys()):
+                        in_server = await local_author_dict[author].in_server_check()
+                        attribute_dict[author] = {'in_server':in_server}
+                        
                 global_author_dict = global_dict_updater(global_author_dict, local_author_dict)
-                
                 for author in local_author_dict:
-                    if measure_dates_per_person:
-                        local_author_dict[author].get_min_max_dates()
+                    local_author_dict[author].get_min_max_dates()
+                    local_author_dict[author].update_attributes(attribute_dict[author])
                     local_author_dict[author] = vars(local_author_dict[author])
                 
                 if author is not None:
                     columns_list = list(local_author_dict[author].keys())
+                    if not measure_dates_per_person:
+                        for date in list(DATE_DICT_ZEROES.keys()):
+                            columns_list.remove(str(date))
+                            
                     columns_list = remove_list_elements(columns_list, keys_to_remove)
                     df = pd.DataFrame(data=local_author_dict.values(), columns=columns_list)
                     df.to_csv(f'{file_save_location}\\{channel} by Users, {guild}.csv', index=False, encoding='utf-8-sig')
@@ -332,11 +346,14 @@ async def on_ready():
             output_total_dict[author_id] = output_value
 
         for author in output_total_dict:
-            if measure_dates_per_person:
-                output_total_dict[author].get_min_max_dates()
+            output_total_dict[author].get_min_max_dates()
             output_total_dict[author] = vars(output_total_dict[author])
         
         columns_list = list(output_total_dict[author_id].keys())
+        if not measure_dates_per_person:
+            for date in list(DATE_DICT_ZEROES.keys()):
+                columns_list.remove(str(date))
+        
         columns_list = remove_list_elements(columns_list, keys_to_remove)
         df = pd.DataFrame(data=output_total_dict.values(), columns=columns_list)
         df.to_csv(f'{file_save_location}\\Combined by Users, {guild}.csv', index=False, encoding='utf-8-sig')
