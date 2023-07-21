@@ -1,6 +1,6 @@
 from datetime import timedelta, timezone, datetime
 from discord.ext import commands
-import discord
+import asyncio
 # import openpyxl
 import pandas as pd
 import numpy as np
@@ -14,6 +14,9 @@ import time
 #!Fix ending time print values
 #!USE OOP!
 #!Make it so that dropped connections do not completely stop the bot
+#!make it so that if someone double-texts (or triple texts or whatever), do not count it as multiple messages
+#!include optional value to append strings in a list to check how many times each person in the server has included those strings in their messages
+#!currently does not scan vc text channels
 
 # function getToken() {
 #   let a = [];
@@ -29,62 +32,118 @@ import time
 #*Add options to see the following properties of individual users (might want to use user class instead of member class when applicable because it is faster):
 #*public_flags, created_at, bot, nick, messages per day, and add option to render their avatar in the spreadsheet
 
-ID_OF_SERVER = 1091116862236012686
-channels_to_measure = [] #leave empty to measure all channels
+#?let us create a dictionary, where the keys are author_id's, and the values to each key is a number of dictionaries where each
+#?dictionary corresponds to the variables of that user in a specific channel.
+
+ID_OF_SERVER = 540980541810540551 #741441440021741579
+channels_to_measure = [] #leave empty to measure all channels 741441440021741582
+keys_to_remove = ['author', 'author_user_profile', 'message_dates_sent'] #list of attributes of Author objects to remove from the final spreadsheets
 message_capture_limit = None #Input None to measure the entire channel
 replace_zeroes_with_empty_cells = False
 measure_by_people = True
 measure_dates_per_person = True
-measure_by_dates = True
+measure_by_dates = False
 file_save_location = r'D:\Programs\Python\Discord Spreadsheets'
-token = 'NzEyMTQ3NjM4NDU5MzAxOTcw.GxGygN.gTZ28LjxpshSiVWm94VPcH82ou5u_AcBRsdsOE'
+token = '' #alt
 
-now = datetime.now()
-now_utc = datetime.utcnow()
+now = datetime.now().date()
+now_utc = datetime.now(timezone.utc).date()
 current_time = now.strftime("%H:%M:%S")
 print(current_time)
 
-class Author:
-    def __init__(self, message, DATE_DICT_ZEROES):
-        self.author = message.author
-        self.author_id = self.author.id
-        self.author_name = self.get_author_name()
-        # self.author_avatar = self.author.display_icon
-        self.message_total = 0
-        self.in_server = self.in_server_check()
-        if DATE_DICT_ZEROES is not None:
-            self.message_dates_dict = DATE_DICT_ZEROES.copy()
-            self.message_dates_sent = []
-        del self.author
+def is_none_checker(attribute, self, other):
+    try:
+        self_attr = getattr(self, attribute)
+    except:
+        self_attr = None
+    try:
+        other_attr = getattr(other, attribute)
+    except:
+        other_attr = None
+    
+    if self_attr is not None:
+        return self_attr
+    elif other_attr is not None:
+        return other_attr
+    else:
+        return None
 
-    def in_server_check(self):
+class Author:
+    def __init__(self, message=None, DATE_DICT_ZEROES=None, input_dict=None):
+        if message is not None:
+            self.author = message.author
+            self.author_id = self.author.id
+            self.author_name = str(self.author)
+            self.message_total = 0
+            if DATE_DICT_ZEROES is not None:
+                for date in DATE_DICT_ZEROES:
+                    setattr(self, str(date), 0)
+                self.message_dates_sent = []
+        else:
+            for attribute in input_dict:
+                setattr(self, attribute, input_dict[attribute])
+
+    def __add__(self, other):
+        '''
+        This will be how values are output in the "Combined Channels" spreadsheet.
+        You must specify how each attribute from one author_id in channel_1 will combine with each attribute from the same author_id in channel_2.
+        The output will be a dictionary of the same type as the output from the output_dataframe_values method, where the keys of the output for
+        the built-in add function will be all of the attributes for an Author object and all of the values will be the corresponding value for each attribute.
+        '''
+        output_dict = {}
+        output_dict['author_id'] = self.author_id
+        output_dict['author_name'] = self.author_name
+        output_dict['message_total'] = self.message_total + other.message_total
+        output_dict['in_server'] = is_none_checker('in_server', self, other)
+        
+        if hasattr(self, 'message_dates_sent'):
+            for date in list(DATE_DICT_ZEROES):
+                output_dict[str(date)] = getattr(self, str(date)) + getattr(other, str(date))
+            self.message_dates_sent.extend(other.message_dates_sent)
+            output_dict['message_dates_sent'] = self.message_dates_sent
+        return Author(input_dict=output_dict)
+    
+    async def get_user_profile(self, user_profile_cached):
+        try:
+            output = await client.fetch_user_profile(self.author_id)
+            self.author_user_profile = output
+        except:
+            self.author_user_profile = None
+        user_profile_cached.set()
+    
+    async def in_server_check(self):
         '''
         Checks to see if the user is still in the Discord server being read.
         '''
-        if type(self.author) == discord.Member:
-            return True
-        elif type(self.author) == discord.User:
+        def contains(list, filter):
+            for x in list:
+                if filter(x):
+                    return True
             return False
-    
-    def get_author_name(self):
-        '''
-        Checks to see if the Discord user still has their tag/discriminator (the numbers at the end of their name, e.g. Chris#9928).
-        If they still have their discriminator, their name will be displayed with the tag and discriminator, e.g. Chris#1251.
-        If they do not have a discriminator, their username will be displayed normally, e.g. Chris.
-        '''
-        if self.author.discriminator != '0':
-            return f'{self.author.name}#{self.author.discriminator}'
+        
+        user_profile_cached = asyncio.Event()
+        asyncio.create_task(self.get_user_profile(user_profile_cached))
+        await user_profile_cached.wait()
+        user_profile_cached.clear()
+        if self.author_user_profile is not None:
+            if contains(self.author_user_profile.mutual_guilds, lambda x: x.id == ID_OF_SERVER):
+                self.in_server = True
+            else:
+                self.in_server = False
         else:
-            return self.author.name
+            self.in_server = False
+
     
     def update_message_totals(self, message):
         '''
         Updates message counters for both the author's total messages in the channel and their total messages in a specific day.
         Will only update message counter for a specific day if measure_dates_per_person is set to True.
         '''
-        if hasattr(self, 'message_dates_dict'):
-            self.message_dates_dict[message.created_at.date()] += 1
-            self.message_dates_sent.append(message.created_at.date())
+        if hasattr(self, 'message_dates_sent'):
+            message_date = message.created_at.date()
+            message_date_total = getattr(self, str(message_date))
+            setattr(self, str(message_date), message_date_total + 1)
+            self.message_dates_sent.append(message_date)
         self.message_total += 1
     
     def get_min_max_dates(self):
@@ -95,9 +154,8 @@ class Author:
         '''
         self.earliest_date = min(self.message_dates_sent)
         self.latest_date = max(self.message_dates_sent)
-        self.days_since_first_message = (now_utc.date() - self.earliest_date).days
-        self.days_since_last_message = (now_utc.date() - self.latest_date).days
-        del self.message_dates_sent
+        self.days_since_first_message = (now_utc - self.earliest_date).days
+        self.days_since_last_message = (now_utc - self.latest_date).days
     
     def make_values_nan(self):
         '''
@@ -109,23 +167,6 @@ class Author:
             for date in self.message_dates_dict:
                 if self.message_dates_dict[date] == 0:
                     self.message_dates_dict[date] = np.nan
-    
-    def output_dataframe_values(self):
-        '''
-        Will unpack the message_dates_dict so that it is not a nested dictionary. This allows Pandas to read the attributes of each author correctly.
-        Hence, this method will output a dictionary of all attributes of an Author object, where each date key in the message_dates_dict attribute will
-        be its own key in the output of this method so that each Author object can properly be converted into rows of a DataFrame.
-        This method will be called right before you convert the data into a DataFrame.
-        '''
-        if hasattr(self, 'message_dates_dict'):
-            output = {}
-            temp_variables = vars(self)
-            output.update(temp_variables['message_dates_dict'])
-            del temp_variables['message_dates_dict']
-            output.update(temp_variables)
-            return output
-        else:
-            return vars(self)
 
 class Date:
     def __init__(self, date):
@@ -134,10 +175,7 @@ class Date:
 
     def update_message_totals(self):
         self.message_count += 1
-    
-    def output_dataframe_values(self):
-        return vars(self)
-    
+
 start_time = time.time()
 df_list_by_people = []
 df_list_by_dates = []
@@ -175,134 +213,144 @@ def empty_date_dict_generator(guild):
     and all values are innitialized at 0.
     '''
     output = {}
-    date_list = pd.date_range(guild.created_at.date(), datetime.now(timezone.utc).date(), freq='D')
+    date_list = pd.date_range(guild.created_at.date(), now_utc, freq='D')
     date_list = [pd.to_datetime(i).date() for i in date_list]
     for date in date_list:
         output[date] = 0
     return output
 
+def global_dict_updater(global_dict, local_dict):
+    '''
+    Outputs the updated global dictionary for either authors or dates that will be used at the end of the program to
+    form the "Combined Channels" spreadsheet(s) that will combine all of the message values from each of the channels,
+    where the inputs are the global dictionary to be updated and the local dictionary to update it with.
+    In an essence, this will create a dictionary where the keys are author_id's (which are unique to each author)
+    or datetime's of specific dates (depending on whether or not you input a global dictionary for authors or dates respectively),
+    and the values for each key will be a list of dictionaries, where each dictionary in that list will correspond to the
+    output for each individual author or date in a specific text channel (in which by "output for each individual" I mean
+    the output dictionary consisting of all of the attribute/value pairs from each author/date in an individual text channel).
+    '''
+    for key in local_dict:
+        if key in global_dict:
+            global_dict[key].append(local_dict[key])
+        else:
+            global_dict[key] = [local_dict[key]]
+    return global_dict
+
+def remove_list_elements(input_list, elements_to_remove):
+    for element in elements_to_remove:
+        try:
+            input_list.remove(element)
+        except:
+            pass
+    return input_list
+
+global client
 client = commands.Bot(command_prefix='>', self_bot=True)
 @client.event
 async def on_ready():
-    global id_of_channels
+    global DATE_DICT_ZEROES, guild
     guild = client.get_guild(ID_OF_SERVER)
     id_of_channels = channel_list_creator(guild, guild.me, channels_to_measure)
     
+    cached_user_profiles = []
+    global_author_dict, global_date_dict = {}, {}
     if measure_by_people and measure_dates_per_person:
         DATE_DICT_ZEROES = empty_date_dict_generator(guild)
     elif measure_by_people and not measure_dates_per_person:
         DATE_DICT_ZEROES = None
     if measure_by_dates:
-        date_list = empty_date_dict_generator(guild).keys()
-        
+        date_list = list(empty_date_dict_generator(guild).keys())
+    
     for channel_id in id_of_channels:
-        author_dict, date_dict = {}, {}
+        local_author_dict, local_date_dict = {}, {}
         channel = client.get_channel(channel_id)
         
         if measure_by_dates:
             for date in date_list:
-                date_dict[date] = Date(date)
-                example_date_index = date
+                local_date_dict[date] = Date(date)
         
         total_messages = 0
         async for message in channel.history(limit=message_capture_limit):
             total_messages += 1
             author = message.author
-            
+
             if measure_by_people:
-                if not author.id in author_dict:
-                    author_dict[author.id] = Author(message, DATE_DICT_ZEROES)
-                author_dict[author.id].update_message_totals(message)
+                if not author.id in local_author_dict:
+                    local_author_dict[author.id] = Author(message=message, DATE_DICT_ZEROES=DATE_DICT_ZEROES)
+                local_author_dict[author.id].update_message_totals(message)
 
             if measure_by_dates:
-                date_dict[message.created_at.date()].update_message_totals()
+                local_date_dict[message.created_at.date()].update_message_totals()
                 
             if total_messages % 10000 == 0:
                 now = datetime.now()
                 current_time = now.strftime("%H:%M:%S")
                 print(f'{current_time} - {total_messages // 1000}k - {channel}')
         
-        if measure_by_people:
-            for author in author_dict:
-                if measure_dates_per_person:
-                    author_dict[author].get_min_max_dates()
-                author_dict[author] = author_dict[author].output_dataframe_values()
-                example_author_index = author
+        if total_messages != 0:
+            if measure_by_people:
+                for author in local_author_dict:
+                    if author not in cached_user_profiles:
+                        await local_author_dict[author].in_server_check()
+                        cached_user_profiles.append(author)
+                global_author_dict = global_dict_updater(global_author_dict, local_author_dict)
+                
+                for author in local_author_dict:
+                    if measure_dates_per_person:
+                        local_author_dict[author].get_min_max_dates()
+                    local_author_dict[author] = vars(local_author_dict[author])
+                
+                if author is not None:
+                    columns_list = list(local_author_dict[author].keys())
+                    columns_list = remove_list_elements(columns_list, keys_to_remove)
+                    df = pd.DataFrame(data=local_author_dict.values(), columns=columns_list)
+                    df.to_csv(f'{file_save_location}\\{channel} by Users, {guild}.csv', index=False, encoding='utf-8-sig')
+                    print(df)
             
-            if example_author_index is not None:
-                columns_list = author_dict[example_author_index].keys()
-                df = pd.DataFrame(data=author_dict.values(), columns=columns_list)
-                df.to_csv(f'{file_save_location}\\{channel} by Users, {guild}.csv', index=False, encoding='utf-8-sig')
-                df_list_by_people.append(df)
-                print(df)
+            if measure_by_dates:
+                global_date_dict = global_dict_updater(global_date_dict, local_date_dict)
+                for date in local_date_dict:
+                    local_date_dict[date] = vars(local_date_dict[date])
+                
+                if date is not None:
+                    columns_list = local_date_dict[date].keys()
+                    columns_list = remove_list_elements(columns_list, keys_to_remove)
+                    df = pd.DataFrame(data=local_date_dict.values(), columns=columns_list)
+                    df.to_csv(f'{file_save_location}\\{channel} by Dates, {guild}.csv', index=False, encoding='utf-8-sig')
+                    print(df)
+    
+    if len(global_author_dict.keys()) != 0:
+        output_total_dict = {}
+        for author_id in global_author_dict:
+            output_value = None
+            for channel_information in global_author_dict[author_id]:
+                if output_value is None:
+                    output_value = channel_information
+                else:
+                    output_value += channel_information
+            output_total_dict[author_id] = output_value
+
+        for author in output_total_dict:
+            if measure_dates_per_person:
+                output_total_dict[author].get_min_max_dates()
+            output_total_dict[author] = vars(output_total_dict[author])
         
+        columns_list = list(output_total_dict[author_id].keys())
+        columns_list = remove_list_elements(columns_list, keys_to_remove)
+        df = pd.DataFrame(data=output_total_dict.values(), columns=columns_list)
+        df.to_csv(f'{file_save_location}\\Combined by Users, {guild}.csv', index=False, encoding='utf-8-sig')
+        print(df)
+
+    if len(global_date_dict.keys()) != 0:
         if measure_by_dates:
-            for date in date_dict:
-                date_dict[date] = date_dict[date].output_dataframe_values()
-                example_date_index = date
-            
-            if example_date_index is not None:
-                columns_list = date_dict[example_date_index].keys()
-                df = pd.DataFrame(data=date_dict.values(), columns=columns_list)
-                df.to_csv(f'{file_save_location}\\{channel} by Dates, {guild}.csv', index=False, encoding='utf-8-sig')
-                df_list_by_dates.append(df)
-                print(df)
-        
+            pass
+    
     await client.close()
 client.run(token)
 
-if measure_by_people:
-    for df in df_list_by_people:
-        df = df.rename(columns={df.columns[2]: 'Message Total'})
-        new_df_list.append(df)
-    new_df_temp = pd.concat(new_df_list)
-    aggregation_functions['Name'] = 'first'
-    aggregation_functions['Message Total'] = 'sum'
-    aggregation_functions['First Message Date'] = 'min'
-    aggregation_functions['Days Since First Message'] = 'max'
-    aggregation_functions['Last Message Date'] = 'max'
-    aggregation_functions['Days Since Last Message'] = 'min'
-    aggregation_functions['Still in Server?'] = 'first'
-    aggregation_functions['User ID'] = 'first'
-    
-    new_df_temp['First Message Date'] = new_df_temp['First Message Date'].apply(lambda element: f'{str(element)[0:4]}-{str(element)[4:6]}-{str(element)[6:]}')
-    new_df_temp['Last Message Date'] = new_df_temp['Last Message Date'].apply(lambda element: f'{str(element)[0:4]}-{str(element)[4:6]}-{str(element)[6:]}')
-        
-    if len(date_list) != 0:
-        for date in date_list:
-            aggregation_functions[date] = 'sum'
-
-    new_df = new_df_temp.groupby(new_df_temp['User ID']).aggregate(aggregation_functions)
-    new_df = new_df.rename(columns={'Message Total': f'({total_messages}) Message Total'})
-    if replace_zeroes_with_empty_cells:
-        counter2 = 0
-        for column in new_df:
-            if counter2 < 8:
-                pass
-            else:
-                new_df[column] = new_df[column].replace(0, np.nan)
-            counter2 += 1
-    new_df.to_csv(f'{file_save_location}\\Combined Channels by Users, {client.get_guild(ID_OF_SERVER)}.csv', index=False, encoding='utf-8-sig')
-    print(new_df)
-
-if measure_by_dates:
-    for df in df_list_by_dates:
-        df = df.rename(columns={df.columns[0]: 'Day Counter'})
-        df = df.rename(columns={df.columns[2]: 'Message Total'})
-        new_df_list.append(df)
-    new_df_temp_by_dates = pd.concat(new_df_list)
-    
-    aggregation_functions_by_dates['Day Counter'] = 'first'
-    aggregation_functions_by_dates['Date'] = 'first'
-    aggregation_functions_by_dates['Message Total'] = 'sum'
-    new_df_by_dates = new_df_temp_by_dates.groupby(new_df_temp_by_dates['Date']).aggregate(aggregation_functions_by_dates)
-    new_df_by_dates = new_df_by_dates.rename(columns={'Message Total': f'({total_messages_by_dates}) Message Total'})
-    new_df_by_dates = new_df_by_dates.rename(columns={'Day Counter': f'({day_counter_list_for_days[-1]}) Day Counter'})
-    new_df_by_dates.to_csv(f'{file_save_location}\\Combined Channels by Dates, {client.get_guild(ID_OF_SERVER)}.csv', index=False, encoding='utf-8-sig')
-    print(new_df_by_dates)
-
 end_time = int(time.time() - start_time)
 try:
-    print(f'Program took {end_time} to complete, indexing {final_message_count} messages across {len(id_of_channels)} channels')
+    print(f'Program took {end_time} to complete, indexing {3 + 3} messages across {len(id_of_channels)} channels')
 except:
     print('finished')
